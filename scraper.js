@@ -28,16 +28,23 @@ const http = axios.create({
 
 // ✅ Extract ALL domains (works for text-based pages like gritbrokerage)
 const extractDomains = ($) => {
-  const text = $("body").text();
+  const domains = new Set();
 
-  // Match domains like .com, .ai, .io etc
-  const regex = /\b[a-zA-Z0-9-]+\.(com|net|org|ai|io|co|us|info|biz)\b/g;
+  // 🎯 Most accurate (table column)
+  $("table tr td:first-child a").each((i, el) => {
+    const text = $(el).text().trim().toLowerCase();
+    domains.add(text);
+  });
+
+  // 🔁 Fallback (in case structure changes)
+  const text = $("body").text();
+  const regex = /\b[a-zA-Z0-9-]+\.(com|net|org|ai|io|co|us|info|biz|xyz|de|blog|tours|homes|domains)\b/g;
 
   const matches = text.match(regex) || [];
+  matches.forEach(d => domains.add(d.toLowerCase()));
 
-  return [...new Set(matches.map(d => d.toLowerCase()))];
+  return [...domains];
 };
-
 // ✅ Get redirect URL
 const getFinalUrl = async (domain) => {
   try {

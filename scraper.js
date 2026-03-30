@@ -2,8 +2,20 @@ const express = require("express");
 const axios = require("axios");
 const cheerio = require("cheerio");
 const pLimit = require("p-limit").default;
+const cors = require("cors");
 
 const app = express();
+
+app.use(
+  cors({
+    origin: [
+      "http://localhost:3000",
+      "https://domainscrapping.netlify.app",
+    ],
+    methods: ["GET", "POST"],
+    allowedHeaders: ["Content-Type"],
+  })
+);
 app.use(express.json());
 
 // Axios instance (prevents blocking)

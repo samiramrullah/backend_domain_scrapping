@@ -3,62 +3,131 @@ const axios = require("axios");
 const cheerio = require("cheerio");
 const pLimit = require("p-limit").default;
 const cors = require("cors");
+const puppeteer = require("puppeteer");
 
 const app = express();
-
-app.use(
-  cors({
-    origin: [
-      "http://localhost:3000",
-      "https://domainscrapping.netlify.app",
-    ],
-    methods: ["GET", "POST"],
-    allowedHeaders: ["Content-Type"],
-  })
-);
+app.use(cors());
 app.use(express.json());
 
-// Axios instance (prevents blocking)
+// ================= AXIOS =================
 const http = axios.create({
   timeout: 20000,
-  headers: {
-    "User-Agent": "Mozilla/5.0",
-  },
+  headers: { "User-Agent": "Mozilla/5.0" },
 });
 
-// ✅ Extract ALL domains (works for text-based pages like gritbrokerage)
-const extractDomains = ($) => {
+// ================= VALIDATION =================
+const DOMAIN_REGEX = /^[a-z0-9]+(-[a-z0-9]+)*\.[a-z]{2,}$/;
+
+const cleanDomain = (d) =>
+  d
+    .toLowerCase()
+    .replace(/^https?:\/\//, "")
+    .replace(/^www\./, "")
+    .replace(/[^a-z0-9.-]/g, "")
+    .trim();
+
+const isValidDomain = (d) => DOMAIN_REGEX.test(d);
+
+// ================= EXTRACTION =================
+
+// 🎯 Priority: structured extraction
+const extractFromDOM = ($) => {
   const domains = new Set();
 
-  // 🎯 Most accurate (table column)
-  $("table tr td:first-child a").each((i, el) => {
-    const text = $(el).text().trim().toLowerCase();
-    domains.add(text);
+  $("a, td, li").each((_, el) => {
+    const text = cleanDomain($(el).text());
+
+    if (isValidDomain(text)) {
+      domains.add(text);
+    }
   });
-
-  // 🔁 Fallback (in case structure changes)
-  const text = $("body").text();
-  const regex = /\b[a-zA-Z0-9-]+\.(com|net|org|ai|io|co|us|info|biz|xyz|de|blog|tours|homes|domains)\b/g;
-
-  const matches = text.match(regex) || [];
-  matches.forEach(d => domains.add(d.toLowerCase()));
 
   return [...domains];
 };
-// ✅ Get redirect URL
+
+// 🔁 Fallback: regex extraction
+const extractFromText = (text) => {
+  const regex = /\b[a-z0-9]+(?:-[a-z0-9]+)*\.[a-z]{2,}\b/gi;
+
+  return [
+    ...new Set(
+      (text.match(regex) || [])
+        .map(cleanDomain)
+        .filter(isValidDomain)
+    ),
+  ];
+};
+
+// ================= AXIOS SCRAPER =================
+const scrapeWithAxios = async (url) => {
+  const { data } = await http.get(url);
+  const $ = cheerio.load(data);
+
+  let domains = extractFromDOM($);
+
+  // fallback if weak extraction
+  if (domains.length < 20) {
+    domains = extractFromText($.text());
+  }
+
+  return domains;
+};
+
+// ================= AUTO SCROLL =================
+const autoScroll = async (page) => {
+  await page.evaluate(async () => {
+    await new Promise((resolve) => {
+      let total = 0;
+      const step = 500;
+
+      const timer = setInterval(() => {
+        window.scrollBy(0, step);
+        total += step;
+
+        if (total >= document.body.scrollHeight) {
+          clearInterval(timer);
+          resolve();
+        }
+      }, 200);
+    });
+  });
+};
+
+// ================= PUPPETEER SCRAPER =================
+const scrapeWithBrowser = async (url) => {
+  const browser = await puppeteer.launch({
+    headless: "new",
+    args: ["--no-sandbox"],
+  });
+
+  const page = await browser.newPage();
+  await page.setUserAgent("Mozilla/5.0");
+
+  await page.goto(url, { waitUntil: "networkidle2", timeout: 60000 });
+
+  await autoScroll(page);
+
+  const text = await page.evaluate(() => document.body.innerText);
+
+  await browser.close();
+
+  return extractFromText(text);
+};
+
+// ================= FINAL URL CHECK =================
 const getFinalUrl = async (domain) => {
   try {
-    const url = domain.startsWith("http") ? domain : `http://${domain}`;
+    const url = `http://${domain}`;
 
-    const response = await http.get(url, {
+    const res = await http.get(url, {
       maxRedirects: 5,
       validateStatus: () => true,
     });
 
     return {
       domain,
-      finalUrl: response.request?.res?.responseUrl || url,
-      status: response.status,
+      finalUrl: res.request?.res?.responseUrl || url,
+      status: res.status,
     };
   } catch {
     return {
@@ -69,21 +138,33 @@ const getFinalUrl = async (domain) => {
   }
 };
 
-// ✅ Main scraper logic
+// ================= MAIN HANDLER =================
 const scrapeHandler = async (url) => {
-  const { data } = await http.get(url);
-  const $ = cheerio.load(data);
+  let domains = [];
 
-  const domains = extractDomains($);
+  try {
+    domains = await scrapeWithAxios(url);
+    console.log("⚡ Axios:", domains.length);
 
-  console.log(`✅ Found ${domains.length} domains`);
+    if (domains.length < 30) {
+      console.log("🔄 Using Puppeteer...");
+      domains = await scrapeWithBrowser(url);
+    }
+  } catch {
+    console.log("⚠️ Axios failed → Puppeteer");
+    domains = await scrapeWithBrowser(url);
+  }
 
-  const limit = pLimit(10); // increase for speed
+  // Final cleanup
+  domains = [...new Set(domains.map(cleanDomain).filter(isValidDomain))];
+
+  console.log("✅ Final domains:", domains.length);
+
+  // Parallel status check
+  const limit = pLimit(15);
 
   const results = await Promise.all(
-    domains.map((domain) =>
-      limit(() => getFinalUrl(domain))
-    )
+    domains.map((d) => limit(() => getFinalUrl(d)))
   );
 
   return {
@@ -93,50 +174,24 @@ const scrapeHandler = async (url) => {
 };
 
 // ================= ROUTES =================
-
-// POST (Postman / frontend)
 app.post("/scrape", async (req, res) => {
-  const url = req.body?.url;
+  const { url } = req.body;
 
-  if (!url) {
-    return res.status(400).json({ error: "URL is required" });
-  }
+  if (!url) return res.status(400).json({ error: "URL required" });
 
   try {
-    console.log("🔍 POST scraping:", url);
-    const result = await scrapeHandler(url);
-    res.json(result);
-  } catch (err) {
-    console.error(err.message);
-    res.status(500).json({ error: "Failed to scrape" });
+    const data = await scrapeHandler(url);
+    res.json(data);
+  } catch (e) {
+    res.status(500).json({ error: "Scrape failed" });
   }
 });
 
-// GET (browser)
-app.get("/scrape", async (req, res) => {
-  const url = req.query?.url;
-
-  if (!url) {
-    return res.send("Use /scrape?url=...");
-  }
-
-  try {
-    console.log("🔍 GET scraping:", url);
-    const result = await scrapeHandler(url);
-    res.json(result);
-  } catch (err) {
-    console.error(err.message);
-    res.status(500).json({ error: "Failed to scrape" });
-  }
+app.get("/", (_, res) => {
+  res.send("🚀 Scraper running");
 });
 
-// Root
-app.get("/", (req, res) => {
-  res.send("🚀 API running. Use /scrape");
-});
-
-// Start server
-const PORT = 5001;
-app.listen(PORT, () => {
-  console.log(`🚀 Server running on http://localhost:${PORT}`);
+// ================= START =================
+app.listen(5001, () => {
+  console.log("🚀 http://localhost:5001");
 });

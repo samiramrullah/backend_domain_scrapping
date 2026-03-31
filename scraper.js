@@ -16,9 +16,7 @@ app.use(
   cors({
     origin: function (origin, callback) {
       if (!origin) return callback(null, true);
-      if (allowedOrigins.includes(origin)) {
-        return callback(null, true);
-      }
+      if (allowedOrigins.includes(origin)) return callback(null, true);
       return callback(new Error("CORS not allowed"));
     },
     methods: ["GET", "POST"],
@@ -31,16 +29,14 @@ app.use(express.json());
 // ================= CONFIG =================
 const PORT = process.env.PORT || 5001;
 
-// 🔥 Real browser headers (fix 403)
 const http = axios.create({
   timeout: 10000,
   headers: {
     "User-Agent":
-      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/122.0.0.0 Safari/537.36",
+      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/122 Safari/537.36",
     Accept:
       "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
     "Accept-Language": "en-US,en;q=0.9",
-    Connection: "keep-alive",
   },
 });
 
@@ -50,9 +46,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 // retry (handles 403)
 const fetchWithRetry = async (url, retries = 2) => {
   try {
-    return await http.get(url, {
-      headers: { Referer: url },
-    });
+    return await http.get(url, { headers: { Referer: url } });
   } catch (err) {
     if (retries > 0) {
       console.log("🔁 Retry...");
@@ -63,45 +57,35 @@ const fetchWithRetry = async (url, retries = 2) => {
   }
 };
 
-// ================= DOMAIN VALIDATION =================
+// ================= DOMAIN FILTER =================
 const isRealDomain = (domain) => {
-  if (!domain) return false;
-
-  if (!domain.includes(".")) return false;
+  if (!domain || !domain.includes(".")) return false;
 
   if (!/^[a-z0-9.-]+$/.test(domain)) return false;
 
-  // reject static files / scripts
   if (
     domain.endsWith(".js") ||
     domain.endsWith(".css") ||
     domain.endsWith(".png") ||
     domain.endsWith(".jpg") ||
-    domain.endsWith(".jpeg") ||
     domain.endsWith(".svg") ||
-    domain.endsWith(".gif") ||
     domain.endsWith(".php") ||
-    domain.endsWith(".html") ||
+    domain.includes("script") ||
     domain.includes("jquery") ||
-    domain.includes("script")
-  ) return false;
-
-  const parts = domain.split(".");
-  if (parts.some((p) => p.length === 0)) return false;
+    domain.includes("mini-site")
+  )
+    return false;
 
   return true;
 };
 
+// ================= EXTRACTION =================
 const extractDomains = ($) => {
   const domains = new Set();
 
   $("body *").each((_, el) => {
     const tag = el.tagName?.toLowerCase();
-
-    // ❌ skip non-visible / irrelevant tags
-    if (
-      ["script", "style", "noscript", "svg"].includes(tag)
-    ) return;
+    if (["script", "style", "noscript"].includes(tag)) return;
 
     const text = $(el).clone().children().remove().end().text().trim();
 
@@ -115,19 +99,7 @@ const extractDomains = ($) => {
 
     matches.forEach((d) => {
       const domain = d.toLowerCase();
-
-      // ❌ filter fake/system patterns
-      if (
-        domain.includes("mini-site") ||   // 🔥 your issue
-        domain.includes("example") ||
-        domain.includes("localhost") ||
-        domain.includes("test") ||
-        domain.includes("dummy") ||
-        domain.includes("script") ||
-        domain.includes("data")
-      ) return;
-
-      domains.add(domain);
+      if (isRealDomain(domain)) domains.add(domain);
     });
   });
 
@@ -135,11 +107,41 @@ const extractDomains = ($) => {
 };
 
 // ================= SCRAPER =================
-const scrapeWithAxios = async (url) => {
+const scrapeSinglePage = async (url) => {
   const { data } = await fetchWithRetry(url);
   const $ = cheerio.load(data);
-
   return extractDomains($);
+};
+
+// ================= PAGINATION =================
+const extractPageNumber = (url) => {
+  const match = url.match(/page\/(\d+)/);
+  return match ? parseInt(match[1]) : 1;
+};
+
+const scrapePagination = async (startUrl, endUrl) => {
+  const start = extractPageNumber(startUrl);
+  const end = extractPageNumber(endUrl);
+
+  const base = startUrl.replace(/page\/\d+\/?$/, "page/");
+
+  let allDomains = new Set();
+
+  for (let i = start; i <= end; i++) {
+    try {
+      const url = `${base}${i}/`;
+      console.log(`📄 ${url}`);
+
+      const domains = await scrapeSinglePage(url);
+      domains.forEach((d) => allDomains.add(d));
+
+      await sleep(300); // prevent blocking
+    } catch {
+      console.log(`❌ Failed page ${i}`);
+    }
+  }
+
+  return [...allDomains];
 };
 
 // ================= STATUS CHECK =================
@@ -152,7 +154,6 @@ const checkDomainsFast = async (domains) => {
         try {
           const res = await http.head(`http://${domain}`, {
             timeout: 3000,
-            maxRedirects: 3,
             validateStatus: () => true,
           });
 
@@ -161,14 +162,12 @@ const checkDomainsFast = async (domains) => {
             finalUrl:
               res.request?.res?.responseUrl || `http://${domain}`,
             status: res.status,
-            result: res.status < 400 ? "pass" : "fail",
           };
         } catch {
           return {
             domain,
-            finalUrl: null,
+            finalUrl: `http://${domain}`,
             status: "failed",
-            result: "fail",
           };
         }
       })
@@ -176,28 +175,22 @@ const checkDomainsFast = async (domains) => {
   );
 };
 
-// ================= MAIN HANDLER =================
-const scrapeHandler = async (url, fastMode = false) => {
+// ================= MAIN =================
+const scrapeHandler = async ({
+  url,
+  paginationMode,
+  startUrl,
+  endUrl,
+}) => {
   let domains = [];
 
-  try {
-    domains = await scrapeWithAxios(url);
-    console.log("⚡ Extracted:", domains.length);
-  } catch (e) {
-    console.error("❌ Scraping failed:", e.message);
-    throw new Error("Scraping failed");
+  if (paginationMode) {
+    domains = await scrapePagination(startUrl, endUrl);
+  } else {
+    domains = await scrapeSinglePage(url);
   }
 
   domains = [...new Set(domains)];
-
-  console.log("✅ Clean domains:", domains.length);
-
-  if (fastMode) {
-    return {
-      total: domains.length,
-      domains,
-    };
-  }
 
   const results = await checkDomainsFast(domains);
 
@@ -207,23 +200,34 @@ const scrapeHandler = async (url, fastMode = false) => {
   };
 };
 
-// ================= ROUTES =================
+// ================= ROUTE =================
 app.post("/scrape", async (req, res) => {
-  const { url } = req.body;
-  const fastMode = req.query.fast === "true";
+  const { url, paginationMode, startUrl, endUrl } = req.body;
 
-  if (!url) {
+  if (!paginationMode && !url) {
     return res.status(400).json({ error: "URL required" });
   }
 
+  if (paginationMode && (!startUrl || !endUrl)) {
+    return res.status(400).json({ error: "Start & End URL required" });
+  }
+
   try {
-    const data = await scrapeHandler(url, fastMode);
+    const data = await scrapeHandler({
+      url,
+      paginationMode,
+      startUrl,
+      endUrl,
+    });
+
     res.json(data);
   } catch (e) {
-    res.status(500).json({ error: "Scrape failed" });
+    console.error(e);
+    res.status(500).json({ error: "Scraping failed" });
   }
 });
 
+// ================= HEALTH =================
 app.get("/", (_, res) => {
   res.send("🚀 Scraper running");
 });

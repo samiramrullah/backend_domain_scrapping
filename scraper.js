@@ -5,8 +5,8 @@ const pLimit = require("p-limit").default;
 const cors = require("cors");
 
 const app = express();
-app.use(cors());
 
+// ================= CORS =================
 const allowedOrigins = [
   "http://localhost:3000",
   "https://domainscrapping.netlify.app",
@@ -15,50 +15,85 @@ const allowedOrigins = [
 app.use(
   cors({
     origin: function (origin, callback) {
-      // allow requests with no origin (like Postman)
       if (!origin) return callback(null, true);
-
       if (allowedOrigins.includes(origin)) {
         return callback(null, true);
-      } else {
-        return callback(new Error("CORS not allowed"));
       }
+      return callback(new Error("CORS not allowed"));
     },
     methods: ["GET", "POST"],
     allowedHeaders: ["Content-Type"],
   })
 );
+
 app.use(express.json());
 
 // ================= CONFIG =================
 const PORT = process.env.PORT || 5001;
 
+// 🔥 Real browser headers (fix 403)
 const http = axios.create({
-  timeout: 8000,
+  timeout: 10000,
   headers: {
-    "User-Agent": "Mozilla/5.0",
+    "User-Agent":
+      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/122.0.0.0 Safari/537.36",
+    Accept:
+      "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.9",
+    Connection: "keep-alive",
   },
 });
 
-// ================= VALIDATION =================
-const DOMAIN_REGEX = /^[a-z0-9]+(-[a-z0-9]+)*\.[a-z]{2,}$/;
+// ================= HELPERS =================
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-const cleanDomain = (input = "") => {
-  return input
-    .toLowerCase()
-    .replace(/^https?:\/\//, "")
-    .replace(/^www\./, "")
-    .replace(/[/?#].*$/, "") // remove paths
-    .replace(/[^a-z0-9.-]/g, "")
-    .trim();
+// retry (handles 403)
+const fetchWithRetry = async (url, retries = 2) => {
+  try {
+    return await http.get(url, {
+      headers: { Referer: url },
+    });
+  } catch (err) {
+    if (retries > 0) {
+      console.log("🔁 Retry...");
+      await sleep(500);
+      return fetchWithRetry(url, retries - 1);
+    }
+    throw err;
+  }
 };
 
-const isValidDomain = (d) => DOMAIN_REGEX.test(d);
+// ================= DOMAIN VALIDATION =================
+const isRealDomain = (domain) => {
+  if (!domain) return false;
+
+  if (!domain.includes(".")) return false;
+
+  if (!/^[a-z0-9.-]+$/.test(domain)) return false;
+
+  // reject static files / scripts
+  if (
+    domain.endsWith(".js") ||
+    domain.endsWith(".css") ||
+    domain.endsWith(".png") ||
+    domain.endsWith(".jpg") ||
+    domain.endsWith(".jpeg") ||
+    domain.endsWith(".svg") ||
+    domain.endsWith(".gif") ||
+    domain.endsWith(".php") ||
+    domain.endsWith(".html") ||
+    domain.includes("jquery") ||
+    domain.includes("script")
+  ) return false;
+
+  const parts = domain.split(".");
+  if (parts.some((p) => p.length === 0)) return false;
+
+  return true;
+};
 
 // ================= EXTRACTION =================
-
-// 🎯 Primary: extract from href (MOST ACCURATE)
-const extractFromAnchors = ($) => {
+const extractDomains = ($) => {
   const domains = new Set();
 
   $("a").each((_, el) => {
@@ -66,53 +101,43 @@ const extractFromAnchors = ($) => {
 
     if (!href) return;
 
-    const cleaned = cleanDomain(href);
+    // skip invalid
+    if (
+      href.startsWith("#") ||
+      href.startsWith("javascript:") ||
+      href.startsWith("mailto:") ||
+      href.startsWith("tel:")
+    )
+      return;
 
-    if (isValidDomain(cleaned)) {
-      domains.add(cleaned);
+    try {
+      if (!href.startsWith("http")) return;
+
+      const urlObj = new URL(href);
+      let hostname = urlObj.hostname.toLowerCase();
+
+      hostname = hostname.replace(/^www\./, "");
+
+      if (isRealDomain(hostname)) {
+        domains.add(hostname);
+      }
+    } catch {
+      // ignore bad URL
     }
   });
 
-  return domains;
-};
-
-// 🎯 Secondary: visible text (backup)
-const extractFromText = (text) => {
-  const regex = /\b[a-z0-9]+(?:-[a-z0-9]+)*\.[a-z]{2,}\b/gi;
-
-  return new Set(
-    (text.match(regex) || [])
-      .map(cleanDomain)
-      .filter(isValidDomain)
-  );
-};
-
-// 🎯 Smart extraction controller
-const extractDomains = ($) => {
-  const anchorDomains = extractFromAnchors($);
-
-  // If enough domains found → use only clean ones
-  if (anchorDomains.size >= 10) {
-    return [...anchorDomains];
-  }
-
-  // fallback to text scan
-  const textDomains = extractFromText($.text());
-
-  return [...new Set([...anchorDomains, ...textDomains])];
+  return [...domains];
 };
 
 // ================= SCRAPER =================
 const scrapeWithAxios = async (url) => {
-  const { data } = await http.get(url);
+  const { data } = await fetchWithRetry(url);
   const $ = cheerio.load(data);
 
-  const domains = extractDomains($);
-
-  return domains;
+  return extractDomains($);
 };
 
-// ================= FAST STATUS CHECK =================
+// ================= STATUS CHECK =================
 const checkDomainsFast = async (domains) => {
   const limit = pLimit(40);
 
@@ -158,12 +183,10 @@ const scrapeHandler = async (url, fastMode = false) => {
     throw new Error("Scraping failed");
   }
 
-  // Final cleanup
-  domains = [...new Set(domains.map(cleanDomain).filter(isValidDomain))];
+  domains = [...new Set(domains)];
 
   console.log("✅ Clean domains:", domains.length);
 
-  // ⚡ FAST MODE (skip status check)
   if (fastMode) {
     return {
       total: domains.length,
@@ -180,10 +203,6 @@ const scrapeHandler = async (url, fastMode = false) => {
 };
 
 // ================= ROUTES =================
-
-// POST /scrape
-// body: { url }
-// optional query: ?fast=true
 app.post("/scrape", async (req, res) => {
   const { url } = req.body;
   const fastMode = req.query.fast === "true";
@@ -195,12 +214,11 @@ app.post("/scrape", async (req, res) => {
   try {
     const data = await scrapeHandler(url, fastMode);
     res.json(data);
-  } catch {
+  } catch (e) {
     res.status(500).json({ error: "Scrape failed" });
   }
 });
 
-// health
 app.get("/", (_, res) => {
   res.send("🚀 Scraper running");
 });

@@ -92,38 +92,39 @@ const isRealDomain = (domain) => {
   return true;
 };
 
-// ================= EXTRACTION =================
 const extractDomains = ($) => {
   const domains = new Set();
 
-  $("a").each((_, el) => {
-    const href = $(el).attr("href");
+  // 🎯 Target ONLY main content (avoid header/footer)
+  const content = $("body").find("*:not(script):not(style)");
 
-    if (!href) return;
+  content.each((_, el) => {
+    const text = $(el).text().trim();
 
-    // skip invalid
-    if (
-      href.startsWith("#") ||
-      href.startsWith("javascript:") ||
-      href.startsWith("mailto:") ||
-      href.startsWith("tel:")
-    )
-      return;
+    // Skip long paragraphs (noise)
+    if (!text || text.length > 200) return;
 
-    try {
-      if (!href.startsWith("http")) return;
+    // 🔥 Strict domain regex
+    const matches = text.match(
+      /\b[a-z0-9][a-z0-9-]{1,61}\.(com|net|org|io|co|info|biz|tv|eu|ws|in)\b/gi
+    );
 
-      const urlObj = new URL(href);
-      let hostname = urlObj.hostname.toLowerCase();
+    if (!matches) return;
 
-      hostname = hostname.replace(/^www\./, "");
+    matches.forEach((d) => {
+      const domain = d.toLowerCase();
 
-      if (isRealDomain(hostname)) {
-        domains.add(hostname);
-      }
-    } catch {
-      // ignore bad URL
-    }
+      // ❌ filter junk patterns
+      if (
+        domain.includes("document") ||
+        domain.includes("window") ||
+        domain.includes("jquery") ||
+        domain.includes("script") ||
+        domain.includes("example")
+      ) return;
+
+      domains.add(domain);
+    });
   });
 
   return [...domains];

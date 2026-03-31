@@ -95,18 +95,20 @@ const isRealDomain = (domain) => {
 const extractDomains = ($) => {
   const domains = new Set();
 
-  // 🎯 Target ONLY main content (avoid header/footer)
-  const content = $("body").find("*:not(script):not(style)");
+  $("body *").each((_, el) => {
+    const tag = el.tagName?.toLowerCase();
 
-  content.each((_, el) => {
-    const text = $(el).text().trim();
+    // ❌ skip non-visible / irrelevant tags
+    if (
+      ["script", "style", "noscript", "svg"].includes(tag)
+    ) return;
 
-    // Skip long paragraphs (noise)
-    if (!text || text.length > 200) return;
+    const text = $(el).clone().children().remove().end().text().trim();
 
-    // 🔥 Strict domain regex
+    if (!text || text.length > 100) return;
+
     const matches = text.match(
-      /\b[a-z0-9][a-z0-9-]{1,61}\.(com|net|org|io|co|info|biz|tv|eu|ws|in)\b/gi
+      /\b[a-z0-9][a-z0-9-]{1,61}\.[a-z]{2,}\b/gi
     );
 
     if (!matches) return;
@@ -114,13 +116,15 @@ const extractDomains = ($) => {
     matches.forEach((d) => {
       const domain = d.toLowerCase();
 
-      // ❌ filter junk patterns
+      // ❌ filter fake/system patterns
       if (
-        domain.includes("document") ||
-        domain.includes("window") ||
-        domain.includes("jquery") ||
+        domain.includes("mini-site") ||   // 🔥 your issue
+        domain.includes("example") ||
+        domain.includes("localhost") ||
+        domain.includes("test") ||
+        domain.includes("dummy") ||
         domain.includes("script") ||
-        domain.includes("example")
+        domain.includes("data")
       ) return;
 
       domains.add(domain);

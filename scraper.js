@@ -3,6 +3,7 @@ const axios = require("axios");
 const cheerio = require("cheerio");
 const pLimit = require("p-limit").default;
 const cors = require("cors");
+const puppeteer = require("puppeteer");
 
 const app = express();
 
@@ -16,11 +17,13 @@ app.use(
   cors({
     origin: function (origin, callback) {
       if (!origin) return callback(null, true);
-      if (allowedOrigins.includes(origin)) return callback(null, true);
+      if (
+        allowedOrigins.includes(origin) ||
+        origin.includes("trycloudflare.com")
+      )
+        return callback(null, true);
       return callback(new Error("CORS not allowed"));
     },
-    methods: ["GET", "POST"],
-    allowedHeaders: ["Content-Type"],
   })
 );
 
@@ -33,51 +36,41 @@ const http = axios.create({
   timeout: 10000,
   headers: {
     "User-Agent":
-      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/122 Safari/537.36",
-    Accept:
-      "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-    "Accept-Language": "en-US,en;q=0.9",
+      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/122 Safari/537.36",
   },
+});
+
+// ================= GLOBAL ERROR SAFETY =================
+process.on("unhandledRejection", (err) => {
+  console.error("🔥 Unhandled Rejection:", err.message);
 });
 
 // ================= HELPERS =================
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-// retry (handles 403)
-const fetchWithRetry = async (url, retries = 2) => {
+// ================= SAFE AXIOS =================
+const safeAxiosGet = async (url) => {
   try {
-    return await http.get(url, { headers: { Referer: url } });
-  } catch (err) {
-    if (retries > 0) {
-      console.log("🔁 Retry...");
-      await sleep(500);
-      return fetchWithRetry(url, retries - 1);
+    const res = await http.get(url, {
+      validateStatus: () => true,
+      headers: { Referer: url },
+    });
+
+    if (res.status >= 400) {
+      console.log(`⚠️ Blocked (${res.status}) → ${url}`);
+      return null;
     }
-    throw err;
+
+    return res.data;
+  } catch (err) {
+    console.log("❌ Axios error:", err.message);
+    return null;
   }
 };
 
 // ================= DOMAIN FILTER =================
-const isRealDomain = (domain) => {
-  if (!domain || !domain.includes(".")) return false;
-
-  if (!/^[a-z0-9.-]+$/.test(domain)) return false;
-
-  if (
-    domain.endsWith(".js") ||
-    domain.endsWith(".css") ||
-    domain.endsWith(".png") ||
-    domain.endsWith(".jpg") ||
-    domain.endsWith(".svg") ||
-    domain.endsWith(".php") ||
-    domain.includes("script") ||
-    domain.includes("jquery") ||
-    domain.includes("mini-site")
-  )
-    return false;
-
-  return true;
-};
+const isRealDomain = (domain) =>
+  /^[a-z0-9-]+\.[a-z]{2,}$/i.test(domain);
 
 // ================= EXTRACTION =================
 const extractDomains = ($) => {
@@ -89,28 +82,56 @@ const extractDomains = ($) => {
 
     const text = $(el).clone().children().remove().end().text().trim();
 
-    if (!text || text.length > 100) return;
+    if (!text || text.length > 80) return;
 
-    const matches = text.match(
-      /\b[a-z0-9][a-z0-9-]{1,61}\.[a-z]{2,}\b/gi
-    );
-
-    if (!matches) return;
-
-    matches.forEach((d) => {
-      const domain = d.toLowerCase();
-      if (isRealDomain(domain)) domains.add(domain);
-    });
+    const match = text.match(/^[a-z0-9-]+\.[a-z]{2,}$/i);
+    if (match) domains.add(match[0].toLowerCase());
   });
 
   return [...domains];
 };
 
-// ================= SCRAPER =================
-const scrapeSinglePage = async (url) => {
-  const { data } = await fetchWithRetry(url);
+// ================= AXIOS SCRAPER =================
+const scrapeWithAxios = async (url) => {
+  const data = await safeAxiosGet(url);
+
+  if (!data) return [];
+
   const $ = cheerio.load(data);
   return extractDomains($);
+};
+
+// ================= PUPPETEER SCRAPER =================
+const scrapeWithBrowser = async (url) => {
+  console.log("🌐 Using Puppeteer...");
+
+  let browser;
+
+  try {
+    browser = await puppeteer.launch({
+      headless: true,
+      args: ["--no-sandbox", "--disable-setuid-sandbox"],
+    });
+
+    const page = await browser.newPage();
+
+    await page.goto(url, {
+      waitUntil: "networkidle2",
+      timeout: 60000,
+    });
+
+    await new Promise((r) => setTimeout(r, 3000));
+
+    const content = await page.content();
+
+    const $ = cheerio.load(content);
+    return extractDomains($);
+  } catch (err) {
+    console.log("❌ Puppeteer failed:", err.message);
+    return [];
+  } finally {
+    if (browser) await browser.close();
+  }
 };
 
 // ================= PAGINATION =================
@@ -128,16 +149,21 @@ const scrapePagination = async (startUrl, endUrl) => {
   let allDomains = new Set();
 
   for (let i = start; i <= end; i++) {
-    try {
-      const url = `${base}${i}/`;
-      console.log(`📄 ${url}`);
+    const pageUrl = `${base}${i}/`;
 
-      const domains = await scrapeSinglePage(url);
+    try {
+      let domains = await scrapeWithAxios(pageUrl);
+
+      if (!domains || domains.length < 5) {
+        console.log(`🔄 Fallback page ${i}`);
+        domains = await scrapeWithBrowser(pageUrl);
+      }
+
       domains.forEach((d) => allDomains.add(d));
 
-      await sleep(300); // prevent blocking
-    } catch {
-      console.log(`❌ Failed page ${i}`);
+      await sleep(300);
+    } catch (err) {
+      console.log(`❌ Page ${i} failed`);
     }
   }
 
@@ -146,7 +172,7 @@ const scrapePagination = async (startUrl, endUrl) => {
 
 // ================= STATUS CHECK =================
 const checkDomainsFast = async (domains) => {
-  const limit = pLimit(40);
+  const limit = pLimit(30);
 
   return Promise.all(
     domains.map((domain) =>
@@ -175,7 +201,7 @@ const checkDomainsFast = async (domains) => {
   );
 };
 
-// ================= MAIN =================
+// ================= MAIN HANDLER =================
 const scrapeHandler = async ({
   url,
   paginationMode,
@@ -184,10 +210,20 @@ const scrapeHandler = async ({
 }) => {
   let domains = [];
 
-  if (paginationMode) {
-    domains = await scrapePagination(startUrl, endUrl);
-  } else {
-    domains = await scrapeSinglePage(url);
+  try {
+    if (paginationMode) {
+      domains = await scrapePagination(startUrl, endUrl);
+    } else {
+      domains = await scrapeWithAxios(url);
+
+      if (!domains || domains.length < 5) {
+        console.log("🔄 Switching to browser...");
+        domains = await scrapeWithBrowser(url);
+      }
+    }
+  } catch (err) {
+    console.log("❌ Handler fallback to browser");
+    domains = await scrapeWithBrowser(url);
   }
 
   domains = [...new Set(domains)];
@@ -204,14 +240,6 @@ const scrapeHandler = async ({
 app.post("/scrape", async (req, res) => {
   const { url, paginationMode, startUrl, endUrl } = req.body;
 
-  if (!paginationMode && !url) {
-    return res.status(400).json({ error: "URL required" });
-  }
-
-  if (paginationMode && (!startUrl || !endUrl)) {
-    return res.status(400).json({ error: "Start & End URL required" });
-  }
-
   try {
     const data = await scrapeHandler({
       url,
@@ -221,18 +249,16 @@ app.post("/scrape", async (req, res) => {
     });
 
     res.json(data);
-  } catch (e) {
-    console.error(e);
-    res.status(500).json({ error: "Scraping failed" });
+  } catch (err) {
+    console.error("🔥 Final error:", err.message);
+
+    res.json({
+      total: 0,
+      results: [],
+      error: "Handled gracefully",
+    });
   }
 });
-
-// ================= HEALTH =================
-app.get("/", (_, res) => {
-  res.send("🚀 Scraper running");
-});
-
-// ================= START =================
 app.listen(PORT, () => {
   console.log(`🚀 Server running on port ${PORT}`);
 });

@@ -7,7 +7,6 @@ const puppeteer = require("puppeteer");
 
 const app = express();
 
-// ================= CORS =================
 const allowedOrigins = [
   "http://localhost:3000",
   "https://domainscrapping.netlify.app",
@@ -29,7 +28,6 @@ app.use(
 
 app.use(express.json());
 
-// ================= CONFIG =================
 const PORT = process.env.PORT || 5001;
 
 const http = axios.create({
@@ -40,15 +38,13 @@ const http = axios.create({
   },
 });
 
-// ================= GLOBAL ERROR SAFETY =================
 process.on("unhandledRejection", (err) => {
-  console.error("🔥 Unhandled Rejection:", err.message);
+  console.error("Unhandled Rejection:", err.message);
 });
 
-// ================= HELPERS =================
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-// ================= SAFE AXIOS =================
+
 const safeAxiosGet = async (url) => {
   try {
     const res = await http.get(url, {
@@ -63,16 +59,30 @@ const safeAxiosGet = async (url) => {
 
     return res.data;
   } catch (err) {
-    console.log("❌ Axios error:", err.message);
+    console.log("Axios error:", err.message);
     return null;
   }
 };
 
-// ================= DOMAIN FILTER =================
-const isRealDomain = (domain) =>
-  /^[a-z0-9-]+\.[a-z]{2,}$/i.test(domain);
+const normalizeUrl = (input) => {
+  if (!input) return "";
 
-// ================= EXTRACTION =================
+  let url = input.trim();
+
+  // remove trailing dot
+  url = url.replace(/\.+$/, "");
+
+  // add protocol if missing
+  if (!/^https?:\/\//i.test(url)) {
+    url = "http://" + url;
+  }
+
+  return url;
+};
+
+// const isRealDomain = (domain) =>
+//   /^[a-z0-9-]+\.[a-z]{2,}$/i.test(domain);
+
 const extractDomains = ($) => {
   const domains = new Set();
 
@@ -91,7 +101,6 @@ const extractDomains = ($) => {
   return [...domains];
 };
 
-// ================= AXIOS SCRAPER =================
 const scrapeWithAxios = async (url) => {
   const data = await safeAxiosGet(url);
 
@@ -101,9 +110,8 @@ const scrapeWithAxios = async (url) => {
   return extractDomains($);
 };
 
-// ================= PUPPETEER SCRAPER =================
 const scrapeWithBrowser = async (url) => {
-  console.log("🌐 Using Puppeteer...");
+  console.log("Using Puppeteer...");
 
   let browser;
 
@@ -127,14 +135,13 @@ const scrapeWithBrowser = async (url) => {
     const $ = cheerio.load(content);
     return extractDomains($);
   } catch (err) {
-    console.log("❌ Puppeteer failed:", err.message);
+    console.log("Puppeteer failed:", err.message);
     return [];
   } finally {
     if (browser) await browser.close();
   }
 };
 
-// ================= PAGINATION =================
 const extractPageNumber = (url) => {
   const match = url.match(/page\/(\d+)/);
   return match ? parseInt(match[1]) : 1;
@@ -163,14 +170,13 @@ const scrapePagination = async (startUrl, endUrl) => {
 
       await sleep(300);
     } catch (err) {
-      console.log(`❌ Page ${i} failed`);
+      console.log(`Page ${i} failed`);
     }
   }
 
   return [...allDomains];
 };
 
-// ================= STATUS CHECK =================
 const checkDomainsFast = async (domains) => {
   const limit = pLimit(30);
 
@@ -201,7 +207,6 @@ const checkDomainsFast = async (domains) => {
   );
 };
 
-// ================= MAIN HANDLER =================
 const scrapeHandler = async ({
   url,
   paginationMode,
@@ -217,12 +222,12 @@ const scrapeHandler = async ({
       domains = await scrapeWithAxios(url);
 
       if (!domains || domains.length < 5) {
-        console.log("🔄 Switching to browser...");
+        console.log("Switching to browser...");
         domains = await scrapeWithBrowser(url);
       }
     }
   } catch (err) {
-    console.log("❌ Handler fallback to browser");
+    console.log("Handler fallback to browser");
     domains = await scrapeWithBrowser(url);
   }
 
@@ -236,21 +241,23 @@ const scrapeHandler = async ({
   };
 };
 
-// ================= ROUTE =================
 app.post("/scrape", async (req, res) => {
   const { url, paginationMode, startUrl, endUrl } = req.body;
 
+  const cleanUrl = url ? normalizeUrl(url) : "";
+  const cleanStartUrl = startUrl ? normalizeUrl(startUrl) : "";
+  const cleanEndUrl = endUrl ? normalizeUrl(endUrl) : "";
   try {
     const data = await scrapeHandler({
-      url,
+      url: cleanUrl,
       paginationMode,
-      startUrl,
-      endUrl,
+      startUrl: cleanStartUrl,
+      endUrl: cleanEndUrl,
     });
 
     res.json(data);
   } catch (err) {
-    console.error("🔥 Final error:", err.message);
+    console.error("Final error:", err.message);
 
     res.json({
       total: 0,
@@ -260,5 +267,5 @@ app.post("/scrape", async (req, res) => {
   }
 });
 app.listen(PORT, () => {
-  console.log(`🚀 Server running on port ${PORT}`);
+  console.log(`Server running on port ${PORT}`);
 });

@@ -9,7 +9,7 @@ const app = express();
 
 const allowedOrigins = [
   "http://localhost:3000",
-  "https://domainscrapping.netlify.app",
+  "https://domainscrapper.netlify.app",
 ];
 
 app.use(

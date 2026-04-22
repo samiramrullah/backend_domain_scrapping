@@ -3,7 +3,7 @@ const axios = require("axios");
 const cheerio = require("cheerio");
 const pLimit = require("p-limit").default;
 const cors = require("cors");
-const puppeteer = require("puppeteer");
+const puppeteer = require("puppeteer-core");
 
 const app = express();
 
@@ -118,6 +118,7 @@ const scrapeWithBrowser = async (url) => {
 
   try {
     browser = await puppeteer.launch({
+      executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || "/usr/bin/chromium",
       headless: true,
       args: ["--no-sandbox", "--disable-setuid-sandbox"],
     });
